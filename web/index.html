@@ -566,26 +566,29 @@
 
         // ===== State =====
         let wasm = null;
-        let viewX = 0, viewZ = 0;
+        let viewX = 0, viewZ = 0;  // world center in blocks
         let zoom = 1;
         let isDragging = false;
         let dragStartX = 0, dragStartY = 0;
         let dragViewX = 0, dragViewZ = 0;
         let markers = [];
 
-        // Buffer: render 3x visible area for smooth panning
-        const BUFFER = 3;
-        let bufferCanvas = null;
-        let bufferCenterX = 0, bufferCenterZ = 0;
-        let bufferScale = 64;
-        let bufferW = 0, bufferH = 0;
-        let bufferWorldW = 0, bufferWorldH = 0;
+        // Big buffer rendered once, panned via CSS transform (GPU)
+        const BUF_SIZE = 2048; // px — large enough for smooth panning
+        let bufCenterX = 0, bufCenterZ = 0; // world center when buffer was rendered
+        let bufScale = 64;    // blocks per biome pixel
+        let bufWorldW = 0, bufWorldH = 0;
+        let bufReady = false;
 
         const canvas = document.getElementById('mapCanvas');
         const ctx = canvas.getContext('2d');
         const overlayCanvas = document.getElementById('overlayCanvas');
         const overlayCtx = overlayCanvas.getContext('2d');
         const container = document.getElementById('mapContainer');
+
+        // Both canvases are sized to buffer, positioned via CSS transform
+        canvas.style.willChange = 'transform';
+        overlayCanvas.style.willChange = 'transform';
 
         function setStatus(text, state = 'loading') {
             document.getElementById('statusText').textContent = text;
@@ -622,15 +625,16 @@
             return zoom < 2 ? 64 : zoom < 4 ? 16 : 4;
         }
 
-        // Generate the large buffer (3x visible)
+        // Pixels per world-block on screen
+        function getPxPerBlock() {
+            return zoom / bufScale;
+        }
+
+        // Render big buffer centered on viewX/viewZ
         function fullRender() {
             const p = getParams();
-            const rect = container.getBoundingClientRect();
             const scale = getScale();
-            const visW = Math.ceil(rect.width / (scale / zoom));
-            const visH = Math.ceil(rect.height / (scale / zoom));
-            const bw = Math.min(Math.max(visW * BUFFER, 32), 1024);
-            const bh = Math.min(Math.max(visH * BUFFER, 32), 1024);
+            const bw = BUF_SIZE, bh = BUF_SIZE;
 
             document.getElementById('loading').classList.add('active');
 
@@ -644,23 +648,27 @@
                     );
                     const renderMs = (performance.now() - t0).toFixed(0);
 
-                    bufferCanvas = document.createElement('canvas');
-                    bufferCanvas.width = bw;
-                    bufferCanvas.height = bh;
-                    bufferCanvas.getContext('2d').putImageData(
-                        new ImageData(new Uint8ClampedArray(rgba), bw, bh), 0, 0
-                    );
+                    // Paint directly onto the visible canvas (sized to buffer)
+                    canvas.width = bw;
+                    canvas.height = bh;
+                    const imgData = new ImageData(new Uint8ClampedArray(rgba), bw, bh);
+                    ctx.putImageData(imgData, 0, 0);
 
-                    bufferCenterX = viewX;
-                    bufferCenterZ = viewZ;
-                    bufferScale = scale;
-                    bufferW = bw;
-                    bufferH = bh;
-                    bufferWorldW = bw * scale;
-                    bufferWorldH = bh * scale;
+                    // Overlay same size
+                    overlayCanvas.width = bw;
+                    overlayCanvas.height = bh;
+
+                    bufCenterX = viewX;
+                    bufCenterZ = viewZ;
+                    bufScale = scale;
+                    bufWorldW = bw * scale;
+                    bufWorldH = bh * scale;
+                    bufReady = true;
 
                     document.getElementById('mapZoom').textContent = zoom.toFixed(1) + 'x · ' + renderMs + 'ms';
-                    drawFromBuffer();
+
+                    drawOverlay();
+                    positionCanvas();
                 } catch (e) {
                     console.error('Render error:', e);
                     setStatus('渲染失败: ' + e.message, 'error');
@@ -669,85 +677,88 @@
             }, 10);
         }
 
-        // Draw visible portion from buffer + overlay
-        function drawFromBuffer() {
-            if (!bufferCanvas) return;
+        // Position canvas via CSS transform — GPU accelerated, instant
+        function positionCanvas() {
+            if (!bufReady) return;
             const rect = container.getBoundingClientRect();
-            const cw = rect.width, ch = rect.height;
-            canvas.width = cw; canvas.height = ch;
-            overlayCanvas.width = cw; overlayCanvas.height = ch;
+            const ppb = getPxPerBlock();
 
-            const worldPerPx = bufferWorldW / bufferW;
-            const offX = (viewX - bufferCenterX) / worldPerPx;
-            const offZ = (viewZ - bufferCenterZ) / worldPerPx;
-            const visW = cw / (bufferScale / zoom);
-            const visH = ch / (bufferScale / zoom);
-            const sx = bufferW / 2 - visW / 2 + offX;
-            const sz = bufferH / 2 - visH / 2 + offZ;
+            // Canvas pixel that corresponds to viewX/viewZ is at (BUF_SIZE/2, BUF_SIZE/2)
+            // We want that pixel at screen center
+            // Additional offset for current pan from buffer center
+            const dWorldX = viewX - bufCenterX;
+            const dWorldZ = viewZ - bufCenterZ;
 
-            ctx.imageSmoothingEnabled = false;
-            ctx.clearRect(0, 0, cw, ch);
-            ctx.drawImage(bufferCanvas, sx, sz, visW, visH, 0, 0, cw, ch);
+            // Screen position of canvas top-left
+            const tx = rect.width / 2 - BUF_SIZE * ppb / 2 - dWorldX * ppb;
+            const tz = rect.height / 2 - BUF_SIZE * ppb / 2 - dWorldZ * ppb;
 
-            drawOverlay(cw, ch, visW);
+            const transform = `translate(${tx}px, ${tz}px) scale(${ppb})`;
+            canvas.style.transform = transform;
+            canvas.style.transformOrigin = '0 0';
+            overlayCanvas.style.transform = transform;
+            overlayCanvas.style.transformOrigin = '0 0';
         }
 
-        function drawOverlay(cw, ch, visW) {
-            overlayCtx.clearRect(0, 0, cw, ch);
+        // Draw search result overlays on the overlay canvas (in buffer pixel coords)
+        function drawOverlay() {
+            if (!bufReady) return;
+            overlayCtx.clearRect(0, 0, BUF_SIZE, BUF_SIZE);
             if (markers.length === 0) return;
 
             const p = getParams();
             const windowBlocks = p.windowSize * 16;
-            const pxPerBlock = cw / (visW * bufferScale);
+            // 1 buffer pixel = bufScale blocks
+            const pxPerBlock = 1.0 / bufScale;
 
             markers.forEach((m, i) => {
-                const screenX = cw / 2 + (m.x - viewX) * pxPerBlock;
-                const screenZ = ch / 2 + (m.z - viewZ) * pxPerBlock;
-                const rectW = windowBlocks * pxPerBlock;
-                const rectH = windowBlocks * pxPerBlock;
-                const rx = screenX - rectW / 2;
-                const rz = screenZ - rectH / 2;
+                // Position in buffer pixels (relative to buffer center)
+                const bpx = BUF_SIZE / 2 + (m.x - bufCenterX) * pxPerBlock;
+                const bpz = BUF_SIZE / 2 + (m.z - bufCenterZ) * pxPerBlock;
+                const rw = windowBlocks * pxPerBlock;
+                const rh = windowBlocks * pxPerBlock;
+                const rx = bpx - rw / 2;
+                const rz = bpz - rh / 2;
 
-                if (rx + rectW < 0 || rx > cw || rz + rectH < 0 || rz > ch) return;
+                if (rx + rw < 0 || rx > BUF_SIZE || rz + rh < 0 || rz > BUF_SIZE) return;
 
                 // Dashed rectangle
-                overlayCtx.strokeStyle = 'rgba(59, 130, 246, 0.7)';
-                overlayCtx.lineWidth = 2;
-                overlayCtx.setLineDash([4, 4]);
-                overlayCtx.strokeRect(rx, rz, rectW, rectH);
+                overlayCtx.strokeStyle = 'rgba(59, 130, 246, 0.8)';
+                overlayCtx.lineWidth = Math.max(1, 2 / (zoom / bufScale));
+                overlayCtx.setLineDash([Math.max(2, 4 / (zoom / bufScale)), Math.max(2, 4 / (zoom / bufScale))]);
+                overlayCtx.strokeRect(rx, rz, rw, rh);
                 overlayCtx.setLineDash([]);
 
-                // Semi-transparent fill
-                overlayCtx.fillStyle = 'rgba(59, 130, 246, 0.08)';
-                overlayCtx.fillRect(rx, rz, rectW, rectH);
+                // Fill
+                overlayCtx.fillStyle = 'rgba(59, 130, 246, 0.12)';
+                overlayCtx.fillRect(rx, rz, rw, rh);
 
                 // Center dot
+                const dotR = Math.max(2, 5 / (zoom / bufScale));
                 overlayCtx.beginPath();
-                overlayCtx.arc(screenX, screenZ, 5, 0, Math.PI * 2);
+                overlayCtx.arc(bpx, bpz, dotR, 0, Math.PI * 2);
                 overlayCtx.fillStyle = 'rgba(59, 130, 246, 0.9)';
                 overlayCtx.fill();
                 overlayCtx.strokeStyle = 'white';
-                overlayCtx.lineWidth = 1.5;
+                overlayCtx.lineWidth = Math.max(0.5, 1.5 / (zoom / bufScale));
                 overlayCtx.stroke();
 
                 // Rank label
-                overlayCtx.font = '600 11px Inter, sans-serif';
+                const fontSize = Math.max(6, 11 / (zoom / bufScale));
+                overlayCtx.font = `600 ${fontSize}px Inter, sans-serif`;
                 overlayCtx.fillStyle = 'white';
                 overlayCtx.textAlign = 'center';
-                overlayCtx.fillText('#' + (i + 1), screenX, screenZ - 10);
+                overlayCtx.fillText('#' + (i + 1), bpx, bpz - dotR - 2);
             });
         }
 
-        function checkBufferBounds() {
-            if (!bufferCanvas) return true;
-            const rect = container.getBoundingClientRect();
-            const visWorldW = rect.width * bufferScale / zoom;
-            const visWorldH = rect.height * bufferScale / zoom;
-            const margin = visWorldW * 0.3;
-            const dx = Math.abs(viewX - bufferCenterX);
-            const dz = Math.abs(viewZ - bufferCenterZ);
-            return dx > (bufferWorldW - visWorldW) / 2 - margin ||
-                   dz > (bufferWorldH - visWorldH) / 2 - margin;
+        // Check if panned too far from buffer center
+        function needsRerender() {
+            if (!bufReady) return true;
+            const dx = Math.abs(viewX - bufCenterX);
+            const dz = Math.abs(viewZ - bufCenterZ);
+            // If we've panned more than 30% of buffer extent, re-render
+            return dx > bufWorldW * 0.3 || dz > bufWorldH * 0.3;
         }
 
         function doSearch() {
@@ -768,7 +779,8 @@
 
                     markers = results || [];
                     displayResults(results, elapsed);
-                    drawFromBuffer();
+                    drawOverlay();
+                    positionCanvas();
                     setStatus(`找到 ${markers.length} 个结果 · 耗时 ${elapsed}s`, 'ready');
                 } catch (e) {
                     setStatus('搜索失败: ' + e.message, 'error');
@@ -809,12 +821,12 @@
                     item.classList.add('active');
                     viewX = parseInt(item.dataset.x);
                     viewZ = parseInt(item.dataset.z);
-                    checkBufferBounds() ? fullRender() : drawFromBuffer();
+                    if (needsRerender()) { fullRender(); } else { positionCanvas(); }
                 });
             });
         }
 
-        // ===== Mouse events =====
+        // ===== Mouse: drag to pan (CSS transform only, no canvas redraw) =====
         container.addEventListener('mousedown', (e) => {
             isDragging = true;
             dragStartX = e.clientX;
@@ -825,10 +837,13 @@
         });
 
         window.addEventListener('mousemove', (e) => {
-            if (!bufferCanvas) return;
+            if (!bufReady) return;
             const rect = container.getBoundingClientRect();
-            const visWorldW = rect.width * bufferScale / zoom;
-            const visWorldH = rect.height * bufferScale / zoom;
+            const ppb = getPxPerBlock();
+            const visWorldW = rect.width / ppb;
+            const visWorldH = rect.height / ppb;
+
+            // Coordinate display
             const relX = (e.clientX - rect.left) / rect.width;
             const relZ = (e.clientY - rect.top) / rect.height;
             const blockX = Math.floor(viewX + (relX - 0.5) * visWorldW);
@@ -838,9 +853,10 @@
             if (isDragging) {
                 const dx = e.clientX - dragStartX;
                 const dz = e.clientY - dragStartY;
-                viewX = dragViewX - dx * (visWorldW / rect.width);
-                viewZ = dragViewZ - dz * (visWorldH / rect.height);
-                drawFromBuffer();
+                viewX = dragViewX - dx / ppb;
+                viewZ = dragViewZ - dz / ppb;
+                // Just move the canvas — pure CSS, 60fps
+                positionCanvas();
             }
         });
 
@@ -848,7 +864,7 @@
             if (isDragging) {
                 isDragging = false;
                 container.style.cursor = 'default';
-                if (checkBufferBounds()) fullRender();
+                if (needsRerender()) fullRender();
             }
         });
 
@@ -864,7 +880,7 @@
         document.getElementById('seed').addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !document.getElementById('searchBtn').disabled) doSearch();
         });
-        window.addEventListener('resize', () => { if (bufferCanvas) fullRender(); });
+        window.addEventListener('resize', () => { if (bufReady) fullRender(); });
 
         initWasm();
     </script>
