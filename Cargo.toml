@@ -1,0 +1,11 @@
+[package]
+name = "mc-biome-finder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rayon = "1.10"
+
+[build-dependencies]
+cc = "1.2"
