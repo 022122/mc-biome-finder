@@ -1,293 +1,589 @@
+
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MC 群系查找器</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗺️</text></svg>">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg-primary: #0a0a0a;
+            --bg-secondary: #111111;
+            --bg-card: rgba(17, 17, 17, 0.8);
+            --bg-input: rgba(255, 255, 255, 0.05);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --border-hover: rgba(255, 255, 255, 0.15);
+            --text-primary: #fafafa;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --accent-glow: rgba(59, 130, 246, 0.15);
+            --success: #22c55e;
+            --danger: #ef4444;
+            --gradient-1: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            --gradient-2: linear-gradient(135deg, #06b6d4, #3b82f6);
+            --radius: 12px;
+            --radius-sm: 8px;
+            --shadow: 0 0 0 1px var(--border-color);
+        }
+
         body {
-            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-            background: #1a1a2e;
-            color: #e0e0e0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
             display: flex;
             height: 100vh;
             overflow: hidden;
+            -webkit-font-smoothing: antialiased;
         }
 
-        /* Sidebar */
+        /* ===== Sidebar ===== */
         .sidebar {
-            width: 320px;
-            background: #16213e;
-            padding: 16px;
+            width: 360px;
+            min-width: 360px;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
-            gap: 12px;
-            overflow-y: auto;
-            border-right: 1px solid #0f3460;
+            overflow: hidden;
         }
-        .sidebar h1 {
-            font-size: 18px;
-            color: #e94560;
+
+        .sidebar-header {
+            padding: 20px 20px 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
             margin-bottom: 4px;
         }
-        .sidebar h2 {
-            font-size: 14px;
-            color: #888;
-            font-weight: normal;
-            margin-bottom: 8px;
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: var(--gradient-1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
         }
+
+        .logo h1 {
+            font-size: 16px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+        }
+
+        .logo-subtitle {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+            padding-left: 42px;
+        }
+
+        /* ===== Form ===== */
+        .sidebar-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .sidebar-body::-webkit-scrollbar { width: 4px; }
+        .sidebar-body::-webkit-scrollbar-track { background: transparent; }
+        .sidebar-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+
         .form-group {
             display: flex;
             flex-direction: column;
-            gap: 4px;
+            gap: 6px;
         }
+
         .form-group label {
-            font-size: 12px;
-            color: #aaa;
-        }
-        .form-group input, .form-group select {
-            background: #0f3460;
-            border: 1px solid #1a1a4e;
-            color: #fff;
-            padding: 6px 8px;
-            border-radius: 4px;
             font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
         }
-        .form-group input:focus, .form-group select:focus {
-            outline: none;
-            border-color: #e94560;
-        }
+
         .form-row {
             display: flex;
-            gap: 8px;
+            gap: 10px;
         }
         .form-row .form-group { flex: 1; }
 
-        button.primary {
-            background: #e94560;
-            color: white;
-            border: none;
-            padding: 10px;
-            border-radius: 6px;
-            font-size: 14px;
+        input, select {
+            width: 100%;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            font-family: inherit;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            outline: none;
+        }
+
+        input:focus, select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+
+        input::placeholder { color: var(--text-muted); }
+
+        select {
             cursor: pointer;
-            font-weight: bold;
-        }
-        button.primary:hover { background: #c73652; }
-        button.primary:disabled {
-            background: #555;
-            cursor: not-allowed;
-        }
-
-        .status {
-            font-size: 12px;
-            color: #888;
-            min-height: 20px;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2371717a' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+            padding-right: 28px;
         }
 
-        /* Results list */
-        .results-title {
-            font-size: 14px;
-            color: #e94560;
-            margin-top: 8px;
+        select option {
+            background: #1a1a1a;
+            color: #fafafa;
         }
-        .results-list {
+
+        /* ===== Buttons ===== */
+        .btn-group {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn {
             flex: 1;
+            padding: 10px 16px;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .btn-primary {
+            background: var(--gradient-1);
+            color: white;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1);
+        }
+        .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
+        .btn-primary:active { transform: translateY(0); }
+        .btn-primary:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: var(--bg-input);
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+        }
+        .btn-secondary:hover {
+            background: rgba(255,255,255,0.08);
+            color: var(--text-primary);
+            border-color: var(--border-hover);
+        }
+
+        /* ===== Status ===== */
+        .status-bar {
+            padding: 8px 20px;
+            border-top: 1px solid var(--border-color);
+            font-size: 12px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 36px;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            flex-shrink: 0;
+        }
+        .status-dot.ready { background: var(--success); }
+        .status-dot.loading { background: var(--accent); animation: pulse 1.5s infinite; }
+        .status-dot.error { background: var(--danger); }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        /* ===== Results ===== */
+        .results-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 2px;
+        }
+
+        .results-title {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .results-count {
+            font-size: 11px;
+            color: var(--text-muted);
+            background: var(--bg-input);
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        .results-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            max-height: 300px;
             overflow-y: auto;
         }
+
+        .results-list::-webkit-scrollbar { width: 4px; }
+        .results-list::-webkit-scrollbar-track { background: transparent; }
+        .results-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+
         .result-item {
-            background: #0f3460;
-            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
             padding: 8px 10px;
-            margin-bottom: 6px;
+            border-radius: var(--radius-sm);
             cursor: pointer;
             transition: background 0.15s;
-            font-size: 12px;
-        }
-        .result-item:hover { background: #1a4080; }
-        .result-item .rank {
-            color: #e94560;
-            font-weight: bold;
-        }
-        .result-item .coords {
-            color: #fff;
-            font-weight: bold;
-        }
-        .result-item .info {
-            color: #aaa;
+            border: 1px solid transparent;
         }
 
-        /* Map area */
+        .result-item:hover {
+            background: rgba(255, 255, 255, 0.04);
+            border-color: var(--border-color);
+        }
+
+        .result-item.active {
+            background: var(--accent-glow);
+            border-color: rgba(59, 130, 246, 0.3);
+        }
+
+        .result-rank {
+            width: 22px;
+            height: 22px;
+            border-radius: 6px;
+            background: var(--bg-input);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+            flex-shrink: 0;
+        }
+
+        .result-item:nth-child(1) .result-rank { background: rgba(234, 179, 8, 0.15); color: #eab308; }
+        .result-item:nth-child(2) .result-rank { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+        .result-item:nth-child(3) .result-rank { background: rgba(180, 83, 9, 0.15); color: #d97706; }
+
+        .result-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .result-coords {
+            font-size: 13px;
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .result-meta {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 1px;
+        }
+
+        .result-chunks {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--accent);
+            white-space: nowrap;
+        }
+
+        /* ===== Map Area ===== */
         .map-container {
             flex: 1;
             position: relative;
             overflow: hidden;
-            background: #111;
+            background: #050505;
         }
+
         canvas {
             position: absolute;
             top: 0;
             left: 0;
             image-rendering: pixelated;
         }
-        .map-info {
+
+        .map-overlay {
             position: absolute;
-            bottom: 8px;
-            left: 8px;
-            background: rgba(0,0,0,0.7);
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            color: #ccc;
+            padding: 6px 12px;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(8px);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            font-size: 12px;
+            color: var(--text-secondary);
+            pointer-events: none;
+            font-variant-numeric: tabular-nums;
         }
+
         .map-coords {
-            position: absolute;
-            top: 8px;
-            right: 8px;
-            background: rgba(0,0,0,0.7);
-            padding: 4px 8px;
-            border-radius: 4px;
+            top: 12px;
+            right: 12px;
+        }
+
+        .map-hint {
+            bottom: 12px;
+            left: 12px;
             font-size: 11px;
-            color: #ccc;
+            color: var(--text-muted);
+        }
+
+        .map-zoom {
+            top: 12px;
+            left: 12px;
         }
 
         /* Loading overlay */
-        .loading {
+        .loading-overlay {
             position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: rgba(0,0,0,0.8);
-            padding: 20px 30px;
-            border-radius: 8px;
-            font-size: 14px;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
             display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
         }
-        .loading.active { display: block; }
+
+        .loading-overlay.active { display: flex; }
+
+        .loading-spinner {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid var(--border-color);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
 
         /* Markers */
         .marker {
             position: absolute;
-            width: 12px;
-            height: 12px;
-            border: 2px solid #e94560;
+            width: 10px;
+            height: 10px;
+            border: 2px solid var(--accent);
             border-radius: 50%;
             transform: translate(-50%, -50%);
             pointer-events: none;
-            box-shadow: 0 0 6px rgba(233, 69, 96, 0.6);
+            box-shadow: 0 0 8px var(--accent-glow), 0 0 2px var(--accent);
+        }
+
+        /* ===== Responsive ===== */
+        @media (max-width: 768px) {
+            .sidebar { width: 100%; min-width: 0; max-height: 50vh; border-right: none; border-bottom: 1px solid var(--border-color); }
+            body { flex-direction: column; }
         }
     </style>
 </head>
 <body>
     <div class="sidebar">
-        <h1>🗺️ MC 群系查找器</h1>
-        <h2>Minecraft Java 群系地图</h2>
-
-        <div class="form-group">
-            <label>种子</label>
-            <input type="text" id="seed" value="123456789" placeholder="输入世界种子">
+        <div class="sidebar-header">
+            <div class="logo">
+                <div class="logo-icon">🗺️</div>
+                <h1>MC 群系查找器</h1>
+            </div>
+            <div class="logo-subtitle">Minecraft Java Edition Biome Finder</div>
         </div>
 
-        <div class="form-row">
+        <div class="sidebar-body">
             <div class="form-group">
-                <label>版本</label>
-                <select id="version">
-                    <option value="1.21">1.21</option>
-                    <option value="1.20">1.20</option>
-                    <option value="1.19">1.19</option>
-                    <option value="1.18" selected>1.18</option>
-                    <option value="1.17">1.17</option>
-                    <option value="1.16">1.16</option>
-                    <option value="1.15">1.15</option>
-                    <option value="1.14">1.14</option>
-                    <option value="1.12">1.12</option>
-                </select>
+                <label>种子 Seed</label>
+                <input type="text" id="seed" value="123456789" placeholder="输入世界种子...">
             </div>
-            <div class="form-group">
-                <label>群系</label>
-                <select id="biome">
-                    <option value="14">蘑菇岛 mushroom_fields</option>
-                    <option value="185">樱花树林 cherry_grove</option>
-                    <option value="186">苍白花园 pale_garden</option>
-                    <option value="21">丛林 jungle</option>
-                    <option value="37">恶地 badlands</option>
-                    <option value="177">草甸 meadow</option>
-                    <option value="183">深暗之域 deep_dark</option>
-                    <option value="184">红树林沼泽 mangrove_swamp</option>
-                    <option value="175">繁茂洞穴 lush_caves</option>
-                    <option value="132">繁花森林 flower_forest</option>
-                    <option value="140">冰刺 ice_spikes</option>
-                    <option value="168">竹林 bamboo_jungle</option>
-                    <option value="29">黑森林 dark_forest</option>
-                    <option value="6">沼泽 swamp</option>
-                    <option value="1">平原 plains</option>
-                    <option value="2">沙漠 desert</option>
-                    <option value="4">森林 forest</option>
-                    <option value="5">针叶林 taiga</option>
-                </select>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label>版本</label>
+                    <select id="version">
+                        <option value="1.21" selected>1.21</option>
+                        <option value="1.20">1.20</option>
+                        <option value="1.19">1.19</option>
+                        <option value="1.18">1.18</option>
+                        <option value="1.17">1.17</option>
+                        <option value="1.16">1.16</option>
+                        <option value="1.15">1.15</option>
+                        <option value="1.14">1.14</option>
+                        <option value="1.12">1.12</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>目标群系</label>
+                    <select id="biome">
+                        <option value="14">🍄 蘑菇岛</option>
+                        <option value="185">🌸 樱花树林</option>
+                        <option value="186">🌿 苍白花园</option>
+                        <option value="21">🌴 丛林</option>
+                        <option value="37">🏜️ 恶地</option>
+                        <option value="177">🌼 草甸</option>
+                        <option value="183">🕳️ 深暗之域</option>
+                        <option value="184">🌳 红树林沼泽</option>
+                        <option value="175">🌱 繁茂洞穴</option>
+                        <option value="132">🌺 繁花森林</option>
+                        <option value="140">❄️ 冰刺</option>
+                        <option value="168">🎋 竹林</option>
+                        <option value="29">🌲 黑森林</option>
+                        <option value="6">💧 沼泽</option>
+                        <option value="1">🌾 平原</option>
+                        <option value="2">🏝️ 沙漠</option>
+                        <option value="4">🌳 森林</option>
+                        <option value="5">🌲 针叶林</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label>窗口 (区块)</label>
+                    <input type="number" id="windowSize" value="16" min="4" max="64">
+                </div>
+                <div class="form-group">
+                    <label>搜索半径 (方块)</label>
+                    <input type="number" id="radius" value="10000" min="1000" max="100000" step="1000">
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label>原点 X</label>
+                    <input type="number" id="originX" value="0">
+                </div>
+                <div class="form-group">
+                    <label>原点 Z</label>
+                    <input type="number" id="originZ" value="0">
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label>返回数量</label>
+                    <input type="number" id="count" value="20" min="1" max="100">
+                </div>
+                <div class="form-group" style="justify-content: flex-end;">
+                    <label>&nbsp;</label>
+                </div>
+            </div>
+
+            <div class="btn-group">
+                <button class="btn btn-primary" id="searchBtn" disabled>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                    搜索群系
+                </button>
+                <button class="btn btn-secondary" id="renderBtn" disabled>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+                    刷新地图
+                </button>
+            </div>
+
+            <!-- Results -->
+            <div id="resultsSection" style="display:none;">
+                <div class="results-header">
+                    <span class="results-title" id="resultsTitle">搜索结果</span>
+                    <span class="results-count" id="resultsCount">0</span>
+                </div>
+                <div style="height:8px;"></div>
+                <div class="results-list" id="resultsList"></div>
             </div>
         </div>
 
-        <div class="form-row">
-            <div class="form-group">
-                <label>窗口大小 (区块)</label>
-                <input type="number" id="windowSize" value="16" min="4" max="64">
-            </div>
-            <div class="form-group">
-                <label>搜索半径 (方块)</label>
-                <input type="number" id="radius" value="10000" min="1000" max="100000" step="1000">
-            </div>
+        <div class="status-bar">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">正在加载 WASM 模块...</span>
         </div>
-
-        <div class="form-row">
-            <div class="form-group">
-                <label>原点 X</label>
-                <input type="number" id="originX" value="0">
-            </div>
-            <div class="form-group">
-                <label>原点 Z</label>
-                <input type="number" id="originZ" value="0">
-            </div>
-        </div>
-
-        <div class="form-group">
-            <label>返回数量</label>
-            <input type="number" id="count" value="20" min="1" max="100">
-        </div>
-
-        <button class="primary" id="searchBtn" disabled>搜索群系</button>
-        <button class="primary" id="renderBtn" disabled style="background:#0f3460">刷新地图</button>
-
-        <div class="status" id="status">正在加载 WASM 模块...</div>
-
-        <div class="results-title" id="resultsTitle"></div>
-        <div class="results-list" id="resultsList"></div>
     </div>
 
     <div class="map-container" id="mapContainer">
         <canvas id="mapCanvas"></canvas>
-        <div class="map-info" id="mapInfo">缩放: 滚轮 | 拖拽: 鼠标左键</div>
-        <div class="map-coords" id="mapCoords">X: 0, Z: 0</div>
-        <div class="loading" id="loading">⏳ 生成中...</div>
+        <div class="map-overlay map-coords" id="mapCoords">X: 0 &nbsp; Z: 0</div>
+        <div class="map-overlay map-zoom" id="mapZoom">1x</div>
+        <div class="map-overlay map-hint">滚轮缩放 · 拖拽平移</div>
+
+        <div class="loading-overlay" id="loading">
+            <div class="loading-spinner">
+                <div class="spinner"></div>
+                <div class="loading-text">生成地图中...</div>
+            </div>
+        </div>
     </div>
 
     <script type="module">
         import init, { generate_biome_map, search_biome, get_biome_name } from './pkg/mc_biome_finder_web.js';
 
+        // State
         let wasm = null;
         let mapData = null;
-        let mapWidth = 0, mapHeight = 0;
         let viewX = 0, viewZ = 0;
         let zoom = 1;
         let isDragging = false;
         let dragStartX = 0, dragStartZ = 0;
         let dragViewX = 0, dragViewZ = 0;
         let markers = [];
+        let activeResultIdx = -1;
 
         const canvas = document.getElementById('mapCanvas');
         const ctx = canvas.getContext('2d');
         const container = document.getElementById('mapContainer');
+
+        // Status helpers
+        function setStatus(text, state = 'loading') {
+            document.getElementById('statusText').textContent = text;
+            const dot = document.getElementById('statusDot');
+            dot.className = 'status-dot ' + state;
+        }
 
         // Init WASM
         async function initWasm() {
@@ -295,10 +591,10 @@
                 wasm = await init();
                 document.getElementById('searchBtn').disabled = false;
                 document.getElementById('renderBtn').disabled = false;
-                document.getElementById('status').textContent = 'WASM 加载完成，可以开始搜索';
+                setStatus('就绪', 'ready');
                 renderMap();
             } catch (e) {
-                document.getElementById('status').textContent = '❌ WASM 加载失败: ' + e.message;
+                setStatus('WASM 加载失败: ' + e.message, 'error');
                 console.error(e);
             }
         }
@@ -319,23 +615,18 @@
         function renderMap() {
             const p = getParams();
             const rect = container.getBoundingClientRect();
-            const w = Math.ceil(rect.width / zoom);
-            const h = Math.ceil(rect.height / zoom);
-
-            // Use scale 16 for overview
             const scale = zoom < 2 ? 64 : zoom < 4 ? 16 : 4;
-            const mapW = Math.ceil(w / (scale / zoom));
-            const mapH = Math.ceil(h / (scale / zoom));
-
-            const clampedW = Math.min(mapW, 512);
-            const clampedH = Math.min(mapH, 512);
+            const w = Math.ceil(rect.width / (scale / zoom));
+            const h = Math.ceil(rect.height / (scale / zoom));
+            const clampedW = Math.min(Math.max(w, 16), 512);
+            const clampedH = Math.min(Math.max(h, 16), 512);
 
             document.getElementById('loading').classList.add('active');
 
             setTimeout(() => {
                 try {
                     const rgba = generate_biome_map(
-                        p.seed, p.version, false,
+                        BigInt(p.seed), p.version, false,
                         Math.floor(viewX), Math.floor(viewZ),
                         clampedW, clampedH, scale
                     );
@@ -353,13 +644,12 @@
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
                     ctx.drawImage(tmpCanvas, 0, 0, canvas.width, canvas.height);
 
-                    mapWidth = clampedW;
-                    mapHeight = clampedH;
                     mapData = { scale, w: clampedW, h: clampedH };
-
+                    document.getElementById('mapZoom').textContent = zoom.toFixed(1) + 'x';
                     updateMarkers();
                 } catch (e) {
                     console.error('Map render error:', e);
+                    setStatus('地图渲染失败: ' + e.message, 'error');
                 }
                 document.getElementById('loading').classList.remove('active');
             }, 10);
@@ -367,53 +657,62 @@
 
         function doSearch() {
             const p = getParams();
-            document.getElementById('status').textContent = '搜索中...';
+            setStatus('搜索中...', 'loading');
             document.getElementById('searchBtn').disabled = true;
 
             setTimeout(() => {
                 try {
                     const results = search_biome(
-                        p.seed, p.version, false,
+                        BigInt(p.seed), p.version, false,
                         p.biome, p.windowSize,
                         p.originX, p.originZ,
                         p.radius, p.count
                     );
 
                     markers = results || [];
-                    displayResults(results, p.biome, p.windowSize);
+                    displayResults(results);
                     updateMarkers();
-                    document.getElementById('status').textContent =
-                        `找到 ${(results || []).length} 个结果`;
+                    setStatus(`找到 ${(results || []).length} 个结果`, 'ready');
                 } catch (e) {
-                    document.getElementById('status').textContent = '❌ 搜索失败: ' + e.message;
+                    setStatus('搜索失败: ' + e.message, 'error');
                     console.error(e);
                 }
                 document.getElementById('searchBtn').disabled = false;
             }, 10);
         }
 
-        function displayResults(results, biomeId, windowSize) {
+        function displayResults(results) {
+            const section = document.getElementById('resultsSection');
             const list = document.getElementById('resultsList');
-            const title = document.getElementById('resultsTitle');
+            const countEl = document.getElementById('resultsCount');
 
             if (!results || results.length === 0) {
-                title.textContent = '未找到结果';
-                list.innerHTML = '';
+                section.style.display = 'block';
+                countEl.textContent = '0';
+                list.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:13px;">未找到匹配的群系区域</div>';
                 return;
             }
 
-            title.textContent = `搜索结果 (${results.length})`;
+            section.style.display = 'block';
+            countEl.textContent = results.length;
             list.innerHTML = results.map((r, i) => `
-                <div class="result-item" data-x="${r.x}" data-z="${r.z}">
-                    <span class="rank">#${i + 1}</span>
-                    <span class="coords">(${r.x}, ${r.z})</span>
-                    <span class="info">| ${r.biome_chunks} 区块 | ${Math.round(r.distance)}m</span>
+                <div class="result-item" data-idx="${i}" data-x="${r.x}" data-z="${r.z}">
+                    <div class="result-rank">${i + 1}</div>
+                    <div class="result-info">
+                        <div class="result-coords">${r.x}, ${r.z}</div>
+                        <div class="result-meta">距离 ${Math.round(r.distance)} 方块</div>
+                    </div>
+                    <div class="result-chunks">${r.biome_chunks} 区块</div>
                 </div>
             `).join('');
 
-            // Click to navigate
             list.querySelectorAll('.result-item').forEach(item => {
                 item.addEventListener('click', () => {
+                    // Highlight
+                    list.querySelectorAll('.result-item').forEach(el => el.classList.remove('active'));
+                    item.classList.add('active');
+                    activeResultIdx = parseInt(item.dataset.idx);
+
                     viewX = parseInt(item.dataset.x);
                     viewZ = parseInt(item.dataset.z);
                     renderMap();
@@ -422,9 +721,7 @@
         }
 
         function updateMarkers() {
-            // Remove old markers
             document.querySelectorAll('.marker').forEach(m => m.remove());
-
             if (!mapData || markers.length === 0) return;
 
             const rect = container.getBoundingClientRect();
@@ -436,7 +733,7 @@
                 const px = ((m.x - viewX + halfW) / (halfW * 2)) * rect.width;
                 const py = ((m.z - viewZ + halfH) / (halfH * 2)) * rect.height;
 
-                if (px >= 0 && px <= rect.width && py >= 0 && py <= rect.height) {
+                if (px >= -10 && px <= rect.width + 10 && py >= -10 && py <= rect.height + 10) {
                     const el = document.createElement('div');
                     el.className = 'marker';
                     el.style.left = px + 'px';
@@ -446,7 +743,7 @@
             });
         }
 
-        // Mouse events for panning
+        // Mouse events
         container.addEventListener('mousedown', (e) => {
             isDragging = true;
             dragStartX = e.clientX;
@@ -458,15 +755,13 @@
 
         window.addEventListener('mousemove', (e) => {
             if (!mapData) return;
-
-            // Update coordinate display
             const rect = container.getBoundingClientRect();
             const relX = (e.clientX - rect.left) / rect.width;
             const relZ = (e.clientY - rect.top) / rect.height;
             const scale = mapData.scale;
             const blockX = Math.floor(viewX + (relX - 0.5) * mapData.w * scale);
             const blockZ = Math.floor(viewZ + (relZ - 0.5) * mapData.h * scale);
-            document.getElementById('mapCoords').textContent = `X: ${blockX}, Z: ${blockZ}`;
+            document.getElementById('mapCoords').textContent = `X: ${blockX}   Z: ${blockZ}`;
 
             if (isDragging) {
                 const dx = e.clientX - dragStartX;
@@ -485,7 +780,7 @@
             }
         });
 
-        // Zoom with scroll
+        // Zoom
         container.addEventListener('wheel', (e) => {
             e.preventDefault();
             const oldZoom = zoom;
@@ -494,17 +789,20 @@
             } else {
                 zoom = Math.max(zoom / 1.5, 0.25);
             }
-            if (zoom !== oldZoom) {
-                renderMap();
-            }
+            if (zoom !== oldZoom) renderMap();
         });
 
         // Buttons
         document.getElementById('searchBtn').addEventListener('click', doSearch);
         document.getElementById('renderBtn').addEventListener('click', renderMap);
 
+        // Enter key triggers search
+        document.getElementById('seed').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !document.getElementById('searchBtn').disabled) doSearch();
+        });
+
         // Resize
-        window.addEventListener('resize', () => renderMap());
+        window.addEventListener('resize', () => { if (mapData) renderMap(); });
 
         // Start
         initWasm();
