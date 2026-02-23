@@ -3,24 +3,52 @@
 use crate::ffi;
 use std::os::raw::c_int;
 
-/// Parse a version string like "1.18" or "1.20" into the cubiomes MC constant.
+/// Parse a version string into the cubiomes MC constant.
+/// Accepts formats like "1.18", "1.18.2", "1.21.1", "1.21.11" etc.
+/// Minor patches within the same major version use the same biome generation.
 pub fn parse_mc_version(version: &str) -> Option<c_int> {
-    match version {
-        "1.0" => Some(ffi::MC_1_0),
-        "1.7" => Some(ffi::MC_1_7),
-        "1.8" => Some(ffi::MC_1_8),
-        "1.9" => Some(ffi::MC_1_9),
-        "1.12" => Some(ffi::MC_1_12),
-        "1.13" => Some(ffi::MC_1_13),
-        "1.14" => Some(ffi::MC_1_14),
-        "1.15" => Some(ffi::MC_1_15),
-        "1.16" => Some(ffi::MC_1_16),
-        "1.17" => Some(ffi::MC_1_17),
-        "1.18" => Some(ffi::MC_1_18),
-        "1.19" => Some(ffi::MC_1_19),
-        "1.20" => Some(ffi::MC_1_20),
-        "1.21" => Some(ffi::MC_1_21),
-        _ => None,
+    let v = version.trim();
+    // Try exact match first
+    match v {
+        "1.0" | "1.0.0" => return Some(ffi::MC_1_0),
+        "1.7" | "1.7.10" => return Some(ffi::MC_1_7),
+        "1.8" | "1.8.9" => return Some(ffi::MC_1_8),
+        "1.9" | "1.9.4" => return Some(ffi::MC_1_9),
+        "1.12" | "1.12.2" => return Some(ffi::MC_1_12),
+        "1.13" | "1.13.2" => return Some(ffi::MC_1_13),
+        "1.14" | "1.14.4" => return Some(ffi::MC_1_14),
+        "1.15" | "1.15.2" => return Some(ffi::MC_1_15),
+        "1.16" | "1.16.5" => return Some(ffi::MC_1_16),
+        "1.17" | "1.17.1" => return Some(ffi::MC_1_17),
+        "1.18" | "1.18.2" => return Some(ffi::MC_1_18),
+        "1.19" | "1.19.2" | "1.19.4" => return Some(ffi::MC_1_19),
+        "1.20" | "1.20.6" => return Some(ffi::MC_1_20),
+        "1.21" => return Some(ffi::MC_1_21),
+        _ => {}
+    }
+    // Fuzzy match: extract major.minor and match
+    let parts: Vec<&str> = v.split('.').collect();
+    if parts.len() >= 2 && parts[0] == "1" {
+        let minor: u32 = parts[1].parse().ok()?;
+        match minor {
+            0 => Some(ffi::MC_1_0),
+            1..=6 => Some(ffi::MC_1_7),   // closest supported
+            7 => Some(ffi::MC_1_7),
+            8 => Some(ffi::MC_1_8),
+            9..=11 => Some(ffi::MC_1_9),
+            12 => Some(ffi::MC_1_12),
+            13 => Some(ffi::MC_1_13),
+            14 => Some(ffi::MC_1_14),
+            15 => Some(ffi::MC_1_15),
+            16 => Some(ffi::MC_1_16),
+            17 => Some(ffi::MC_1_17),
+            18 => Some(ffi::MC_1_18),
+            19 => Some(ffi::MC_1_19),
+            20 => Some(ffi::MC_1_20),
+            21.. => Some(ffi::MC_1_21),    // 1.21+ all use latest
+        }
+    } else {
+        None
     }
 }
 
