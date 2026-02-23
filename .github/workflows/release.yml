@@ -1,0 +1,110 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-cli:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: mc-biome-finder-linux-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: mc-biome-finder-windows-x64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: mc-biome-finder-macos-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: mc-biome-finder-macos-arm64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact }}.tar.gz mc-biome-finder
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path mc-biome-finder.exe -DestinationPath ../../../${{ matrix.artifact }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.*
+
+  build-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install LLVM (for C cross-compile to WASM)
+        run: sudo apt-get update && sudo apt-get install -y llvm clang
+
+      - name: Build WASM
+        run: cd web && wasm-pack build --target web --release
+
+      - name: Package web app
+        run: |
+          mkdir -p web-dist
+          cp web/index.html web-dist/
+          cp -r web/pkg web-dist/pkg
+          tar czf mc-biome-finder-web.tar.gz -C web-dist .
+
+      - name: Upload web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-biome-finder-web
+          path: mc-biome-finder-web.tar.gz
+
+  release:
+    needs: [build-cli, build-web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/mc-biome-finder-linux-x64/*.tar.gz
+            artifacts/mc-biome-finder-windows-x64/*.zip
+            artifacts/mc-biome-finder-macos-x64/*.tar.gz
+            artifacts/mc-biome-finder-macos-arm64/*.tar.gz
+            artifacts/mc-biome-finder-web/*.tar.gz
