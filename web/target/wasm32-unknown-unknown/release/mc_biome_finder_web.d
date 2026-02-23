@@ -1,0 +1,1 @@
+f:\022122\MC群系查找\web\target\wasm32-unknown-unknown\release\mc_biome_finder_web.wasm: f:\022122\MC群系查找\web\../origin/ f:\022122\MC群系查找\web\build.rs f:\022122\MC群系查找\web\src\lib.rs f:\022122\MC群系查找\web\wasm-stubs/
