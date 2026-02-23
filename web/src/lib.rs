@@ -234,9 +234,10 @@ pub fn generate_biome_map(
     rgba
 }
 
-/// Search for biome-dense areas. Returns JSON array of results.
+/// Search a Z-range shard for biome-dense areas. Returns JSON array of raw results (no NMS).
+/// Used by parallel worker pool — each worker scans a different Z shard.
 #[wasm_bindgen]
-pub fn search_biome(
+pub fn search_biome_shard(
     seed: i64,
     version: &str,
     large_biomes: bool,
@@ -245,7 +246,8 @@ pub fn search_biome(
     origin_x: i32,
     origin_z: i32,
     radius: i32,
-    count: usize,
+    bz_start: i32,
+    bz_end: i32,
 ) -> JsValue {
     let mc = parse_mc_version(version).unwrap_or(MC_1_21);
     let flags = if large_biomes { LARGE_BIOMES } else { 0 };
@@ -254,14 +256,11 @@ pub fn search_biome(
     let step_chunks = (window_chunks / 2).max(1);
     let radius_biome = radius / 4;
     let origin_bx = origin_x / 4;
-    let origin_bz = origin_z / 4;
     let window_biome = window_chunks * 4;
     let step_biome = step_chunks * 4;
 
     let scan_min_bx = origin_bx - radius_biome;
     let scan_max_bx = origin_bx + radius_biome - window_biome;
-    let scan_min_bz = origin_bz - radius_biome;
-    let scan_max_bz = origin_bz + radius_biome - window_biome;
 
     let mut gen: Box<Generator> = Box::new(unsafe { std::mem::zeroed() });
     unsafe {
@@ -270,10 +269,10 @@ pub fn search_biome(
     }
 
     let mut results: Vec<BiomeSearchResult> = Vec::new();
+    let strip_sx = scan_max_bx - scan_min_bx + window_biome;
 
-    let mut bz = scan_min_bz;
-    while bz <= scan_max_bz {
-        let strip_sx = scan_max_bx - scan_min_bx + window_biome;
+    let mut bz = bz_start;
+    while bz <= bz_end {
         let strip_sz = window_biome;
 
         if strip_sx > 0 && strip_sz > 0 {
@@ -324,30 +323,39 @@ pub fn search_biome(
         bz += step_biome;
     }
 
+    // Sort within shard (merge on JS side)
     results.sort_by(|a, b| {
         b.biome_chunks
             .cmp(&a.biome_chunks)
             .then_with(|| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal))
     });
+    // Keep top results per shard to limit transfer size
+    results.truncate(200);
 
-    // NMS dedup: skip results whose center is within window_blocks of an already-selected result
-    let window_blocks = (window_size * 16) as f64;
-    let mut selected: Vec<BiomeSearchResult> = Vec::with_capacity(count);
-    for r in results {
-        let dominated = selected.iter().any(|s| {
-            let dx = (r.x - s.x) as f64;
-            let dz = (r.z - s.z) as f64;
-            (dx * dx + dz * dz).sqrt() < window_blocks
-        });
-        if !dominated {
-            selected.push(r);
-            if selected.len() >= count {
-                break;
-            }
-        }
-    }
+    serde_wasm_bindgen::to_value(&results).unwrap_or(JsValue::NULL)
+}
 
-    serde_wasm_bindgen::to_value(&selected).unwrap_or(JsValue::NULL)
+/// Legacy single-threaded search (kept for compatibility).
+#[wasm_bindgen]
+pub fn search_biome(
+    seed: i64,
+    version: &str,
+    large_biomes: bool,
+    biome_id: i32,
+    window_size: i32,
+    origin_x: i32,
+    origin_z: i32,
+    radius: i32,
+    count: usize,
+) -> JsValue {
+    let origin_bz = origin_z / 4;
+    let radius_biome = radius / 4;
+    let window_biome = window_size * 4;
+    let scan_min_bz = origin_bz - radius_biome;
+    let scan_max_bz = origin_bz + radius_biome - window_biome;
+
+    // Delegate to shard covering full range
+    search_biome_shard(seed, version, large_biomes, biome_id, window_size, origin_x, origin_z, radius, scan_min_bz, scan_max_bz)
 }
 
 /// Get biome name from ID

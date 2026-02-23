@@ -197,6 +197,9 @@
         const workers = [];
         const idleWorkers = [];
         const tileQueue = [];   // { id, data, generation }
+        // Parallel search state
+        let searchShardsPending = 0;
+        let searchShardResults = [];
         let searchResolve = null;
         let searchReject = null;
 
@@ -270,18 +273,31 @@
                 return;
             }
 
-            if (msg.type === 'search-done') {
+            if (msg.type === 'shard-done') {
                 w._busy = false;
                 idleWorkers.push(wIdx);
-                if (searchResolve) { searchResolve(msg); searchResolve = null; searchReject = null; }
+                if (msg.results) searchShardResults.push(...msg.results);
+                searchShardsPending--;
+                if (searchShardsPending === 0 && searchResolve) {
+                    searchResolve(searchShardResults);
+                    searchShardResults = [];
+                    searchResolve = null;
+                    searchReject = null;
+                }
                 drainQueue();
                 return;
             }
 
-            if (msg.type === 'search-error') {
+            if (msg.type === 'shard-error') {
                 w._busy = false;
                 idleWorkers.push(wIdx);
-                if (searchReject) { searchReject(new Error(msg.error)); searchResolve = null; searchReject = null; }
+                searchShardsPending--;
+                if (searchShardsPending === 0 && searchResolve) {
+                    searchResolve(searchShardResults);
+                    searchShardResults = [];
+                    searchResolve = null;
+                    searchReject = null;
+                }
                 drainQueue();
                 return;
             }
@@ -442,7 +458,7 @@
             });
         }
 
-        // ===== Search (via worker — non-blocking) =====
+        // ===== Search (parallel shards across all workers) =====
         async function doSearch() {
             const p = getParams();
             setStatus('搜索中...', 'loading');
@@ -450,46 +466,80 @@
 
             const t0 = performance.now();
 
-            // Find an idle worker or wait
+            // Compute Z range in biome coords
+            const radiusBiome = Math.floor(p.radius / 4);
+            const originBz = Math.floor(p.originZ / 4);
+            const windowBiome = p.windowSize * 4;
+            const stepBiome = Math.max(Math.floor(p.windowSize / 2), 1) * 4;
+            const scanMinBz = originBz - radiusBiome;
+            const scanMaxBz = originBz + radiusBiome - windowBiome;
+
+            // Split Z range into N shards (one per worker)
+            const totalSteps = Math.max(1, Math.floor((scanMaxBz - scanMinBz) / stepBiome) + 1);
+            const nShards = Math.min(NUM_WORKERS, totalSteps);
+            const stepsPerShard = Math.ceil(totalSteps / nShards);
+
+            searchShardResults = [];
+            searchShardsPending = nShards;
+
             const promise = new Promise((resolve, reject) => {
                 searchResolve = resolve;
                 searchReject = reject;
             });
 
-            // Push search to front of queue (priority)
-            const searchData = {
-                type: 'search',
-                seed: p.seed, version: p.version,
-                biomeId: p.biome, windowSize: p.windowSize,
-                originX: p.originX, originZ: p.originZ,
-                radius: p.radius, count: p.count
-            };
+            // Dispatch shards — send directly to workers, bypassing tile queue
+            for (let i = 0; i < nShards; i++) {
+                const startStep = i * stepsPerShard;
+                const endStep = Math.min((i + 1) * stepsPerShard - 1, totalSteps - 1);
+                const bzStart = scanMinBz + startStep * stepBiome;
+                const bzEnd = scanMinBz + endStep * stepBiome;
 
-            if (idleWorkers.length > 0) {
-                const wIdx = idleWorkers.shift();
-                const w = workers[wIdx];
-                w._busy = true;
-                w.postMessage(searchData);
-            } else {
-                // All workers busy — wait for one to free up via interval
-                const waitInterval = setInterval(() => {
+                const shardData = {
+                    type: 'search-shard',
+                    shardId: i,
+                    seed: p.seed, version: p.version,
+                    biomeId: p.biome, windowSize: p.windowSize,
+                    originX: p.originX, originZ: p.originZ,
+                    radius: p.radius,
+                    bzStart, bzEnd
+                };
+
+                // Wait for an idle worker
+                const sendShard = () => {
                     if (idleWorkers.length > 0) {
-                        clearInterval(waitInterval);
                         const wIdx = idleWorkers.shift();
-                        const w = workers[wIdx];
-                        w._busy = true;
-                        w.postMessage(searchData);
+                        workers[wIdx]._busy = true;
+                        workers[wIdx].postMessage(shardData);
+                    } else {
+                        setTimeout(sendShard, 20);
                     }
-                }, 50);
+                };
+                sendShard();
             }
 
             try {
-                const msg = await promise;
+                const rawResults = await promise;
+                // Merge: sort all shard results, then NMS dedup
+                rawResults.sort((a, b) =>
+                    (b.biome_chunks - a.biome_chunks) || (a.distance - b.distance)
+                );
+                const windowBlocks = p.windowSize * 16;
+                const selected = [];
+                for (const r of rawResults) {
+                    const dominated = selected.some(s => {
+                        const dx = r.x - s.x, dz = r.z - s.z;
+                        return Math.sqrt(dx * dx + dz * dz) < windowBlocks;
+                    });
+                    if (!dominated) {
+                        selected.push(r);
+                        if (selected.length >= p.count) break;
+                    }
+                }
                 const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-                markers = msg.results || [];
+                markers = selected;
                 displayResults(markers, elapsed);
                 drawOverlay();
-                setStatus(`找到 ${markers.length} 个结果 · 耗时 ${elapsed}s`, 'ready');
+                setStatus(`找到 ${markers.length} 个结果 · ${nShards} 分片并行 · 耗时 ${elapsed}s`, 'ready');
             } catch (e) {
                 setStatus('搜索失败: ' + e.message, 'error');
                 console.error(e);

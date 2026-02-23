@@ -1,7 +1,7 @@
 // Tile rendering Web Worker (ES Module)
 // Each worker has its own WASM instance for parallel rendering
 
-import init, { generate_biome_map, search_biome } from './pkg/mc_biome_finder_web.js';
+import init, { generate_biome_map, search_biome_shard } from './pkg/mc_biome_finder_web.js';
 
 let ready = false;
 
@@ -25,7 +25,6 @@ self.onmessage = function(e) {
                 BigInt(msg.seed), msg.version, false,
                 msg.cx, msg.cz, msg.size, msg.size, msg.scale
             );
-            // Copy to transferable ArrayBuffer
             const buf = new Uint8Array(rgba).buffer;
             postMessage({ type: 'tile-done', id: msg.id, rgba: buf, size: msg.size }, [buf]);
         } catch (e) {
@@ -34,20 +33,18 @@ self.onmessage = function(e) {
         return;
     }
 
-    if (msg.type === 'search') {
-        if (!ready) { postMessage({ type: 'search-error', error: 'not ready' }); return; }
+    if (msg.type === 'search-shard') {
+        if (!ready) { postMessage({ type: 'shard-error', shardId: msg.shardId, error: 'not ready' }); return; }
         try {
-            const t0 = performance.now();
-            const results = search_biome(
+            const results = search_biome_shard(
                 BigInt(msg.seed), msg.version, false,
                 msg.biomeId, msg.windowSize,
                 msg.originX, msg.originZ,
-                msg.radius, msg.count
+                msg.radius, msg.bzStart, msg.bzEnd
             );
-            const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-            postMessage({ type: 'search-done', results: results || [], elapsed });
+            postMessage({ type: 'shard-done', shardId: msg.shardId, results: results || [] });
         } catch (e) {
-            postMessage({ type: 'search-error', error: e.message });
+            postMessage({ type: 'shard-error', shardId: msg.shardId, error: e.message });
         }
         return;
     }
