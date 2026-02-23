@@ -146,6 +146,21 @@ pub fn search_biomes(params: &SearchParams, progress: Option<&Mutex<(u32, u32)>>
             .then_with(|| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal))
     });
 
-    results.truncate(params.count);
-    results
+    // NMS dedup: skip results whose center is within window_blocks of an already-selected result
+    let window_blocks = (params.window_size * 16) as f64;
+    let mut selected: Vec<SearchResult> = Vec::with_capacity(params.count);
+    for r in results {
+        let dominated = selected.iter().any(|s| {
+            let dx = (r.x - s.x) as f64;
+            let dz = (r.z - s.z) as f64;
+            (dx * dx + dz * dz).sqrt() < window_blocks
+        });
+        if !dominated {
+            selected.push(r);
+            if selected.len() >= params.count {
+                break;
+            }
+        }
+    }
+    selected
 }

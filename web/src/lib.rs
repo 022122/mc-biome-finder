@@ -329,9 +329,25 @@ pub fn search_biome(
             .cmp(&a.biome_chunks)
             .then_with(|| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal))
     });
-    results.truncate(count);
 
-    serde_wasm_bindgen::to_value(&results).unwrap_or(JsValue::NULL)
+    // NMS dedup: skip results whose center is within window_blocks of an already-selected result
+    let window_blocks = (window_size * 16) as f64;
+    let mut selected: Vec<BiomeSearchResult> = Vec::with_capacity(count);
+    for r in results {
+        let dominated = selected.iter().any(|s| {
+            let dx = (r.x - s.x) as f64;
+            let dz = (r.z - s.z) as f64;
+            (dx * dx + dz * dz).sqrt() < window_blocks
+        });
+        if !dominated {
+            selected.push(r);
+            if selected.len() >= count {
+                break;
+            }
+        }
+    }
+
+    serde_wasm_bindgen::to_value(&selected).unwrap_or(JsValue::NULL)
 }
 
 /// Get biome name from ID
