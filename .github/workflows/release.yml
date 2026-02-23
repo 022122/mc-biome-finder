@@ -78,6 +78,7 @@ jobs:
         run: |
           mkdir -p web-dist
           cp web/index.html web-dist/
+          cp web/tile-worker.js web-dist/
           cp -r web/pkg web-dist/pkg
           tar czf mc-biome-finder-web.tar.gz -C web-dist .
 

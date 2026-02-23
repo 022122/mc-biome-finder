@@ -137,19 +137,21 @@
     </div>
 
     <script type="module">
-        import init, { generate_biome_map, search_biome } from './pkg/mc_biome_finder_web.js';
-
-        // ===== Tile Map Engine =====
-        // Like Chunkbase: world split into tiles, cached, CSS transform for pan/zoom
+        // ===== Worker-Pooled Tile Map Engine =====
+        // All WASM computation runs in Web Workers — main thread stays at 60fps
         const TILE_PX = 256;
-        let wasm = null;
-        let viewX = 0, viewZ = 0;   // world center (blocks)
-        let zoom = 0.5;             // screen pixels per block
+        const NUM_WORKERS = Math.min(navigator.hardwareConcurrency || 4, 8);
+        let viewX = 0, viewZ = 0;
+        let zoom = 0.5;
         let isDragging = false, dragSX = 0, dragSY = 0, dragVX = 0, dragVZ = 0;
         let markers = [];
+        let workersReady = 0;
+        let tileIdCounter = 0;
+        let viewGeneration = 0; // incremented on each updateView to cancel stale tiles
 
-        // Tile cache: "scale:tx:tz" -> { canvas, scale, tx, tz }
         const cache = new Map();
+        const inflight = new Map(); // tileId -> { key, scale, tx, tz, generation }
+        const inflightKeys = new Set(); // quick lookup for pending keys
         const MAX_CACHE = 600;
 
         const tileLayer = document.getElementById('tileLayer');
@@ -175,89 +177,180 @@
             };
         }
 
-        // Pick biome resolution: blocks per biome pixel
-        // Lower = more detail. We want each biome pixel to be 1-4 screen px.
         function getScale() {
             if (zoom >= 1) return 4;
             if (zoom >= 0.25) return 16;
             return 64;
         }
 
-        // Tile world size in blocks
         function tileWorld(scale) { return TILE_PX * scale; }
-
-        // World -> tile index
         function w2t(w, scale) { return Math.floor(w / tileWorld(scale)); }
-
         function tileKey(s, tx, tz) { return s + ':' + tx + ':' + tz; }
 
-        // Render one tile synchronously
-        function renderTile(scale, tx, tz) {
-            const key = tileKey(scale, tx, tz);
-            if (cache.has(key)) return cache.get(key);
+        // ===== Worker Pool =====
+        const workers = [];
+        const idleWorkers = [];
+        const tileQueue = [];   // { id, data, generation }
+        let searchResolve = null;
+        let searchReject = null;
 
-            const p = getParams();
-            const tw = tileWorld(scale);
-            const cx = tx * tw + tw / 2;
-            const cz = tz * tw + tw / 2;
+        function createWorkers() {
+            for (let i = 0; i < NUM_WORKERS; i++) {
+                const w = new Worker('./tile-worker.js', { type: 'module' });
+                w.onmessage = handleWorkerMsg.bind(null, i);
+                w.onerror = e => console.error('Worker error:', e);
+                w._busy = false;
+                workers.push(w);
+            }
+        }
 
-            const rgba = generate_biome_map(BigInt(p.seed), p.version, false, cx, cz, TILE_PX, TILE_PX, scale);
+        function handleWorkerMsg(wIdx, e) {
+            const msg = e.data;
+            const w = workers[wIdx];
 
-            const c = document.createElement('canvas');
-            c.width = TILE_PX; c.height = TILE_PX;
-            c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba), TILE_PX, TILE_PX), 0, 0);
+            if (msg.type === 'ready') {
+                workersReady++;
+                idleWorkers.push(wIdx);
+                if (workersReady === NUM_WORKERS) {
+                    document.getElementById('searchBtn').disabled = false;
+                    document.getElementById('renderBtn').disabled = false;
+                    setStatus(`就绪 (${NUM_WORKERS} workers)`, 'ready');
+                    updateView();
+                } else {
+                    setStatus(`加载 WASM... (${workersReady}/${NUM_WORKERS})`, 'loading');
+                }
+                drainQueue();
+                return;
+            }
 
-            const tile = { canvas: c, scale, tx, tz, key };
+            if (msg.type === 'tile-done') {
+                w._busy = false;
+                idleWorkers.push(wIdx);
+                const info = inflight.get(msg.id);
+                if (info) {
+                    inflight.delete(msg.id);
+                    inflightKeys.delete(info.key);
+                    // Only use result if generation matches (not stale)
+                    if (info.generation === viewGeneration) {
+                        const rgba = new Uint8ClampedArray(msg.rgba);
+                        const c = document.createElement('canvas');
+                        c.width = msg.size; c.height = msg.size;
+                        c.style.position = 'absolute';
+                        c.style.imageRendering = 'pixelated';
+                        c.getContext('2d').putImageData(new ImageData(rgba, msg.size, msg.size), 0, 0);
 
+                        evictCache();
+                        const tile = { canvas: c, scale: info.scale, tx: info.tx, tz: info.tz, key: info.key };
+                        cache.set(info.key, tile);
+
+                        if (info.scale === getScale()) {
+                            c.style.left = (info.tx * TILE_PX) + 'px';
+                            c.style.top = (info.tz * TILE_PX) + 'px';
+                            c.dataset.tk = info.key;
+                            tileLayer.appendChild(c);
+                        }
+                    }
+                }
+                drainQueue();
+                return;
+            }
+
+            if (msg.type === 'tile-error') {
+                w._busy = false;
+                idleWorkers.push(wIdx);
+                const info = inflight.get(msg.id);
+                if (info) { inflight.delete(msg.id); inflightKeys.delete(info.key); }
+                drainQueue();
+                return;
+            }
+
+            if (msg.type === 'search-done') {
+                w._busy = false;
+                idleWorkers.push(wIdx);
+                if (searchResolve) { searchResolve(msg); searchResolve = null; searchReject = null; }
+                drainQueue();
+                return;
+            }
+
+            if (msg.type === 'search-error') {
+                w._busy = false;
+                idleWorkers.push(wIdx);
+                if (searchReject) { searchReject(new Error(msg.error)); searchResolve = null; searchReject = null; }
+                drainQueue();
+                return;
+            }
+        }
+
+        function drainQueue() {
+            while (tileQueue.length > 0 && idleWorkers.length > 0) {
+                const task = tileQueue.shift();
+                // Skip stale tasks
+                if (task.generation !== viewGeneration) {
+                    const info = inflight.get(task.id);
+                    if (info) { inflight.delete(task.id); inflightKeys.delete(info.key); }
+                    continue;
+                }
+                const wIdx = idleWorkers.shift();
+                const w = workers[wIdx];
+                w._busy = true;
+                w.postMessage(task.data);
+            }
+        }
+
+        function evictCache() {
             if (cache.size >= MAX_CACHE) {
                 const oldest = cache.keys().next().value;
                 const old = cache.get(oldest);
-                if (old.canvas.parentNode) old.canvas.parentNode.removeChild(old.canvas);
+                if (old.canvas.parentNode) old.canvas.remove();
                 cache.delete(oldest);
             }
-            cache.set(key, tile);
-            return tile;
         }
 
-        // Main view update: position tileLayer via CSS, load missing tiles async
-        let pendingTiles = [];
-        let loadingTiles = false;
+        function requestTile(scale, tx, tz, generation) {
+            const key = tileKey(scale, tx, tz);
+            if (cache.has(key) || inflightKeys.has(key)) return;
 
-        function updateView() {
-            if (!wasm) return;
-            const rect = container.getBoundingClientRect();
-            const scale = getScale();
+            const id = ++tileIdCounter;
+            const p = getParams();
             const tw = tileWorld(scale);
 
-            // Visible world bounds
-            const hw = rect.width / zoom / 2, hh = rect.height / zoom / 2;
-            const wl = viewX - hw, wr = viewX + hw;
-            const wt = viewZ - hh, wb = viewZ + hh;
+            inflight.set(id, { key, scale, tx, tz, generation });
+            inflightKeys.add(key);
 
-            // Tile range (with margin)
-            const txMin = w2t(wl, scale) - 1, txMax = w2t(wr, scale) + 1;
-            const tzMin = w2t(wt, scale) - 1, tzMax = w2t(wb, scale) + 1;
+            tileQueue.push({
+                id, generation,
+                data: {
+                    type: 'render-tile', id,
+                    seed: p.seed, version: p.version,
+                    cx: tx * tw + tw / 2, cz: tz * tw + tw / 2,
+                    size: TILE_PX, scale
+                }
+            });
+        }
 
-            // Position tile layer: transform so tile (0,0) top-left maps to world (0,0)
-            // Screen center = container center = viewX, viewZ in world
-            // World (0,0) in screen px = (rect.width/2 - viewX*zoom, rect.height/2 - viewZ*zoom)
-            // Tile pixel (0,0) of tile (tx,tz) = (tx*TILE_PX, tz*TILE_PX) in tile-layer space
-            // Tile-layer space -> world: multiply by scale
-            // So tile-layer transform: translate(screenOriginX, screenOriginY) scale(zoom * scale / 1)
-            // Actually: tile pixel p maps to world block (p * scale)
-            // Screen position of world block w = (w - viewX) * zoom + rect.width/2
-            // So tile pixel p -> screen = (p * scale - viewX) * zoom + rect.width/2
-            // = p * scale * zoom - viewX * zoom + rect.width/2
-            // tileLayer transform: translate(ox, oz) scale(s) where
-            // ox = -viewX * zoom + rect.width/2, oz = -viewZ * zoom + rect.height/2
-            // s = scale * zoom (converts tile px to screen px)
-
+        // ===== View Update =====
+        function positionTileLayer() {
+            const rect = container.getBoundingClientRect();
+            const scale = getScale();
             const s = scale * zoom;
             const ox = -viewX * zoom + rect.width / 2;
             const oz = -viewZ * zoom + rect.height / 2;
             tileLayer.style.transform = `translate(${ox}px, ${oz}px) scale(${s})`;
+        }
 
-            // Remove tiles of wrong scale from DOM
+        function updateView() {
+            if (workersReady === 0) return;
+            viewGeneration++;
+            const rect = container.getBoundingClientRect();
+            const scale = getScale();
+
+            positionTileLayer();
+
+            const hw = rect.width / zoom / 2, hh = rect.height / zoom / 2;
+            const txMin = w2t(viewX - hw, scale) - 1, txMax = w2t(viewX + hw, scale) + 1;
+            const tzMin = w2t(viewZ - hh, scale) - 1, tzMax = w2t(viewZ + hh, scale) + 1;
+
+            // Remove wrong-scale tiles from DOM
             for (const child of [...tileLayer.children]) {
                 const tk = child.dataset.tk;
                 if (!tk) { child.remove(); continue; }
@@ -265,14 +358,15 @@
                 if (!t || t.scale !== scale) child.remove();
             }
 
-            // Ensure visible tiles exist
-            pendingTiles = [];
+            // Collect missing tiles with distance from center for priority sorting
+            const missing = [];
+            const ctxF = (txMin + txMax) / 2, ctzF = (tzMin + tzMax) / 2;
+
             for (let tz = tzMin; tz <= tzMax; tz++) {
                 for (let tx = txMin; tx <= txMax; tx++) {
                     const key = tileKey(scale, tx, tz);
                     const existing = cache.get(key);
                     if (existing) {
-                        // Make sure it's in DOM
                         if (!existing.canvas.parentNode) {
                             existing.canvas.style.left = (tx * TILE_PX) + 'px';
                             existing.canvas.style.top = (tz * TILE_PX) + 'px';
@@ -280,39 +374,28 @@
                             tileLayer.appendChild(existing.canvas);
                         }
                     } else {
-                        pendingTiles.push({ scale, tx, tz });
+                        const dx = tx - ctxF, dz = tz - ctzF;
+                        missing.push({ scale, tx, tz, dist: dx * dx + dz * dz });
                     }
                 }
             }
 
-            // Load pending tiles async (non-blocking, one per frame)
-            if (pendingTiles.length > 0 && !loadingTiles) {
-                loadingTiles = true;
-                loadNextTile();
-            }
+            // Sort: center tiles first (closest to viewport center)
+            missing.sort((a, b) => a.dist - b.dist);
 
-            // Update overlay
+            // Clear stale queue entries and request new tiles
+            tileQueue.length = 0;
+            for (const { scale, tx, tz } of missing) {
+                requestTile(scale, tx, tz, viewGeneration);
+            }
+            drainQueue();
+
             drawOverlay();
-            document.getElementById('mapZoom').textContent = zoom.toFixed(2) + 'x · ' + scale + 'b/px';
+            document.getElementById('mapZoom').textContent =
+                zoom.toFixed(2) + 'x · ' + scale + 'b/px · ' + NUM_WORKERS + 'w';
         }
 
-        function loadNextTile() {
-            if (pendingTiles.length === 0) { loadingTiles = false; return; }
-            const { scale, tx, tz } = pendingTiles.shift();
-            const key = tileKey(scale, tx, tz);
-            if (!cache.has(key)) {
-                try {
-                    const tile = renderTile(scale, tx, tz);
-                    tile.canvas.style.left = (tx * TILE_PX) + 'px';
-                    tile.canvas.style.top = (tz * TILE_PX) + 'px';
-                    tile.canvas.dataset.tk = key;
-                    tileLayer.appendChild(tile.canvas);
-                } catch(e) { console.error('tile error', e); }
-            }
-            requestAnimationFrame(loadNextTile);
-        }
-
-        // Overlay: draw search result rectangles on viewport-sized canvas
+        // ===== Overlay =====
         function drawOverlay() {
             const rect = container.getBoundingClientRect();
             overlayCanvas.width = rect.width;
@@ -326,10 +409,8 @@
             markers.forEach((m, i) => {
                 const sx = (m.x - viewX) * zoom + rect.width / 2;
                 const sz = (m.z - viewZ) * zoom + rect.height / 2;
-                const rw = windowBlocks * zoom;
-                const rh = windowBlocks * zoom;
+                const rw = windowBlocks * zoom, rh = rw;
                 const rx = sx - rw / 2, rz = sz - rh / 2;
-
                 if (rx + rw < 0 || rx > rect.width || rz + rh < 0 || rz > rect.height) return;
 
                 overlayCtx.strokeStyle = 'rgba(59,130,246,0.7)';
@@ -355,23 +436,59 @@
             });
         }
 
-        // Search
-        function doSearch() {
+        // ===== Search (via worker — non-blocking) =====
+        async function doSearch() {
             const p = getParams();
             setStatus('搜索中...', 'loading');
             document.getElementById('searchBtn').disabled = true;
-            setTimeout(() => {
-                try {
-                    const t0 = performance.now();
-                    const results = search_biome(BigInt(p.seed), p.version, false, p.biome, p.windowSize, p.originX, p.originZ, p.radius, p.count);
-                    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-                    markers = results || [];
-                    displayResults(results, elapsed);
-                    drawOverlay();
-                    setStatus(`找到 ${markers.length} 个结果 · 耗时 ${elapsed}s`, 'ready');
-                } catch (e) { setStatus('搜索失败: ' + e.message, 'error'); console.error(e); }
-                document.getElementById('searchBtn').disabled = false;
-            }, 10);
+
+            const t0 = performance.now();
+
+            // Find an idle worker or wait
+            const promise = new Promise((resolve, reject) => {
+                searchResolve = resolve;
+                searchReject = reject;
+            });
+
+            // Push search to front of queue (priority)
+            const searchData = {
+                type: 'search',
+                seed: p.seed, version: p.version,
+                biomeId: p.biome, windowSize: p.windowSize,
+                originX: p.originX, originZ: p.originZ,
+                radius: p.radius, count: p.count
+            };
+
+            if (idleWorkers.length > 0) {
+                const wIdx = idleWorkers.shift();
+                const w = workers[wIdx];
+                w._busy = true;
+                w.postMessage(searchData);
+            } else {
+                // All workers busy — wait for one to free up via interval
+                const waitInterval = setInterval(() => {
+                    if (idleWorkers.length > 0) {
+                        clearInterval(waitInterval);
+                        const wIdx = idleWorkers.shift();
+                        const w = workers[wIdx];
+                        w._busy = true;
+                        w.postMessage(searchData);
+                    }
+                }, 50);
+            }
+
+            try {
+                const msg = await promise;
+                const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+                markers = msg.results || [];
+                displayResults(markers, elapsed);
+                drawOverlay();
+                setStatus(`找到 ${markers.length} 个结果 · 耗时 ${elapsed}s`, 'ready');
+            } catch (e) {
+                setStatus('搜索失败: ' + e.message, 'error');
+                console.error(e);
+            }
+            document.getElementById('searchBtn').disabled = false;
         }
 
         function displayResults(results, elapsed) {
@@ -405,14 +522,14 @@
             });
         }
 
-        // ===== Mouse: drag (CSS transform, 60fps) =====
+        // ===== Mouse: drag (CSS transform only, 60fps) =====
         container.addEventListener('mousedown', e => {
             isDragging = true; dragSX = e.clientX; dragSY = e.clientY;
             dragVX = viewX; dragVZ = viewZ;
             container.style.cursor = 'grabbing';
         });
         window.addEventListener('mousemove', e => {
-            if (!wasm) return;
+            if (workersReady === 0) return;
             const rect = container.getBoundingClientRect();
             const relX = (e.clientX - rect.left) / rect.width;
             const relZ = (e.clientY - rect.top) / rect.height;
@@ -422,12 +539,7 @@
             if (isDragging) {
                 viewX = dragVX - (e.clientX - dragSX) / zoom;
                 viewZ = dragVZ - (e.clientY - dragSY) / zoom;
-                // Instant: just reposition tile layer via CSS
-                const scale = getScale();
-                const s = scale * zoom;
-                const ox = -viewX * zoom + rect.width / 2;
-                const oz = -viewZ * zoom + rect.height / 2;
-                tileLayer.style.transform = `translate(${ox}px, ${oz}px) scale(${s})`;
+                positionTileLayer();
                 drawOverlay();
             }
         });
@@ -435,7 +547,7 @@
             if (isDragging) {
                 isDragging = false;
                 container.style.cursor = 'grab';
-                updateView(); // load any new tiles needed
+                updateView();
             }
         });
 
@@ -445,7 +557,6 @@
             const oldZoom = zoom;
             zoom = e.deltaY < 0 ? Math.min(zoom * 1.3, 8) : Math.max(zoom / 1.3, 0.02);
             if (zoom !== oldZoom) {
-                // Zoom toward mouse position
                 const rect = container.getBoundingClientRect();
                 const mx = (e.clientX - rect.left - rect.width / 2) / oldZoom;
                 const mz = (e.clientY - rect.top - rect.height / 2) / oldZoom;
@@ -458,9 +569,12 @@
         // Clear cache and reload
         function clearAndReload() {
             for (const [k, t] of cache) {
-                if (t.canvas.parentNode) t.canvas.parentNode.removeChild(t.canvas);
+                if (t.canvas.parentNode) t.canvas.remove();
             }
             cache.clear();
+            inflightKeys.clear();
+            inflight.clear();
+            tileQueue.length = 0;
             updateView();
         }
 
@@ -469,24 +583,13 @@
         document.getElementById('seed').addEventListener('keydown', e => {
             if (e.key === 'Enter' && !document.getElementById('searchBtn').disabled) doSearch();
         });
-        // Seed/version change -> clear cache
         document.getElementById('seed').addEventListener('change', clearAndReload);
         document.getElementById('version').addEventListener('change', clearAndReload);
-        window.addEventListener('resize', () => { if (wasm) updateView(); });
+        window.addEventListener('resize', () => { if (workersReady > 0) updateView(); });
 
-        async function start() {
-            try {
-                wasm = await init();
-                document.getElementById('searchBtn').disabled = false;
-                document.getElementById('renderBtn').disabled = false;
-                setStatus('就绪', 'ready');
-                updateView();
-            } catch (e) {
-                setStatus('WASM 加载失败: ' + e.message, 'error');
-                console.error(e);
-            }
-        }
-        start();
+        // ===== Start =====
+        createWorkers();
+        setStatus(`加载 WASM... (0/${NUM_WORKERS})`, 'loading');
     </script>
 </body>
 </html>
