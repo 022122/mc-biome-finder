@@ -548,6 +548,7 @@
 
     <div class="map-container" id="mapContainer">
         <canvas id="mapCanvas"></canvas>
+        <canvas id="overlayCanvas" style="position:absolute;top:0;left:0;pointer-events:none;"></canvas>
         <div class="map-overlay map-coords" id="mapCoords">X: 0 &nbsp; Z: 0</div>
         <div class="map-overlay map-zoom" id="mapZoom">1x</div>
         <div class="map-overlay map-hint">滚轮缩放 · 拖拽平移</div>
@@ -563,36 +564,41 @@
     <script type="module">
         import init, { generate_biome_map, search_biome, get_biome_name } from './pkg/mc_biome_finder_web.js';
 
-        // State
+        // ===== State =====
         let wasm = null;
-        let mapData = null;
         let viewX = 0, viewZ = 0;
         let zoom = 1;
         let isDragging = false;
-        let dragStartX = 0, dragStartZ = 0;
+        let dragStartX = 0, dragStartY = 0;
         let dragViewX = 0, dragViewZ = 0;
         let markers = [];
-        let activeResultIdx = -1;
+
+        // Buffer: render 3x visible area for smooth panning
+        const BUFFER = 3;
+        let bufferCanvas = null;
+        let bufferCenterX = 0, bufferCenterZ = 0;
+        let bufferScale = 64;
+        let bufferW = 0, bufferH = 0;
+        let bufferWorldW = 0, bufferWorldH = 0;
 
         const canvas = document.getElementById('mapCanvas');
         const ctx = canvas.getContext('2d');
+        const overlayCanvas = document.getElementById('overlayCanvas');
+        const overlayCtx = overlayCanvas.getContext('2d');
         const container = document.getElementById('mapContainer');
 
-        // Status helpers
         function setStatus(text, state = 'loading') {
             document.getElementById('statusText').textContent = text;
-            const dot = document.getElementById('statusDot');
-            dot.className = 'status-dot ' + state;
+            document.getElementById('statusDot').className = 'status-dot ' + state;
         }
 
-        // Init WASM
         async function initWasm() {
             try {
                 wasm = await init();
                 document.getElementById('searchBtn').disabled = false;
                 document.getElementById('renderBtn').disabled = false;
                 setStatus('就绪', 'ready');
-                renderMap();
+                fullRender();
             } catch (e) {
                 setStatus('WASM 加载失败: ' + e.message, 'error');
                 console.error(e);
@@ -612,47 +618,136 @@
             };
         }
 
-        function renderMap() {
+        function getScale() {
+            return zoom < 2 ? 64 : zoom < 4 ? 16 : 4;
+        }
+
+        // Generate the large buffer (3x visible)
+        function fullRender() {
             const p = getParams();
             const rect = container.getBoundingClientRect();
-            const scale = zoom < 2 ? 64 : zoom < 4 ? 16 : 4;
-            const w = Math.ceil(rect.width / (scale / zoom));
-            const h = Math.ceil(rect.height / (scale / zoom));
-            const clampedW = Math.min(Math.max(w, 16), 512);
-            const clampedH = Math.min(Math.max(h, 16), 512);
+            const scale = getScale();
+            const visW = Math.ceil(rect.width / (scale / zoom));
+            const visH = Math.ceil(rect.height / (scale / zoom));
+            const bw = Math.min(Math.max(visW * BUFFER, 32), 1024);
+            const bh = Math.min(Math.max(visH * BUFFER, 32), 1024);
 
             document.getElementById('loading').classList.add('active');
 
             setTimeout(() => {
                 try {
+                    const t0 = performance.now();
                     const rgba = generate_biome_map(
                         BigInt(p.seed), p.version, false,
                         Math.floor(viewX), Math.floor(viewZ),
-                        clampedW, clampedH, scale
+                        bw, bh, scale
+                    );
+                    const renderMs = (performance.now() - t0).toFixed(0);
+
+                    bufferCanvas = document.createElement('canvas');
+                    bufferCanvas.width = bw;
+                    bufferCanvas.height = bh;
+                    bufferCanvas.getContext('2d').putImageData(
+                        new ImageData(new Uint8ClampedArray(rgba), bw, bh), 0, 0
                     );
 
-                    canvas.width = rect.width;
-                    canvas.height = rect.height;
+                    bufferCenterX = viewX;
+                    bufferCenterZ = viewZ;
+                    bufferScale = scale;
+                    bufferW = bw;
+                    bufferH = bh;
+                    bufferWorldW = bw * scale;
+                    bufferWorldH = bh * scale;
 
-                    const imgData = new ImageData(new Uint8ClampedArray(rgba), clampedW, clampedH);
-                    const tmpCanvas = document.createElement('canvas');
-                    tmpCanvas.width = clampedW;
-                    tmpCanvas.height = clampedH;
-                    tmpCanvas.getContext('2d').putImageData(imgData, 0, 0);
-
-                    ctx.imageSmoothingEnabled = false;
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
-                    ctx.drawImage(tmpCanvas, 0, 0, canvas.width, canvas.height);
-
-                    mapData = { scale, w: clampedW, h: clampedH };
-                    document.getElementById('mapZoom').textContent = zoom.toFixed(1) + 'x';
-                    updateMarkers();
+                    document.getElementById('mapZoom').textContent = zoom.toFixed(1) + 'x · ' + renderMs + 'ms';
+                    drawFromBuffer();
                 } catch (e) {
-                    console.error('Map render error:', e);
-                    setStatus('地图渲染失败: ' + e.message, 'error');
+                    console.error('Render error:', e);
+                    setStatus('渲染失败: ' + e.message, 'error');
                 }
                 document.getElementById('loading').classList.remove('active');
             }, 10);
+        }
+
+        // Draw visible portion from buffer + overlay
+        function drawFromBuffer() {
+            if (!bufferCanvas) return;
+            const rect = container.getBoundingClientRect();
+            const cw = rect.width, ch = rect.height;
+            canvas.width = cw; canvas.height = ch;
+            overlayCanvas.width = cw; overlayCanvas.height = ch;
+
+            const worldPerPx = bufferWorldW / bufferW;
+            const offX = (viewX - bufferCenterX) / worldPerPx;
+            const offZ = (viewZ - bufferCenterZ) / worldPerPx;
+            const visW = cw / (bufferScale / zoom);
+            const visH = ch / (bufferScale / zoom);
+            const sx = bufferW / 2 - visW / 2 + offX;
+            const sz = bufferH / 2 - visH / 2 + offZ;
+
+            ctx.imageSmoothingEnabled = false;
+            ctx.clearRect(0, 0, cw, ch);
+            ctx.drawImage(bufferCanvas, sx, sz, visW, visH, 0, 0, cw, ch);
+
+            drawOverlay(cw, ch, visW);
+        }
+
+        function drawOverlay(cw, ch, visW) {
+            overlayCtx.clearRect(0, 0, cw, ch);
+            if (markers.length === 0) return;
+
+            const p = getParams();
+            const windowBlocks = p.windowSize * 16;
+            const pxPerBlock = cw / (visW * bufferScale);
+
+            markers.forEach((m, i) => {
+                const screenX = cw / 2 + (m.x - viewX) * pxPerBlock;
+                const screenZ = ch / 2 + (m.z - viewZ) * pxPerBlock;
+                const rectW = windowBlocks * pxPerBlock;
+                const rectH = windowBlocks * pxPerBlock;
+                const rx = screenX - rectW / 2;
+                const rz = screenZ - rectH / 2;
+
+                if (rx + rectW < 0 || rx > cw || rz + rectH < 0 || rz > ch) return;
+
+                // Dashed rectangle
+                overlayCtx.strokeStyle = 'rgba(59, 130, 246, 0.7)';
+                overlayCtx.lineWidth = 2;
+                overlayCtx.setLineDash([4, 4]);
+                overlayCtx.strokeRect(rx, rz, rectW, rectH);
+                overlayCtx.setLineDash([]);
+
+                // Semi-transparent fill
+                overlayCtx.fillStyle = 'rgba(59, 130, 246, 0.08)';
+                overlayCtx.fillRect(rx, rz, rectW, rectH);
+
+                // Center dot
+                overlayCtx.beginPath();
+                overlayCtx.arc(screenX, screenZ, 5, 0, Math.PI * 2);
+                overlayCtx.fillStyle = 'rgba(59, 130, 246, 0.9)';
+                overlayCtx.fill();
+                overlayCtx.strokeStyle = 'white';
+                overlayCtx.lineWidth = 1.5;
+                overlayCtx.stroke();
+
+                // Rank label
+                overlayCtx.font = '600 11px Inter, sans-serif';
+                overlayCtx.fillStyle = 'white';
+                overlayCtx.textAlign = 'center';
+                overlayCtx.fillText('#' + (i + 1), screenX, screenZ - 10);
+            });
+        }
+
+        function checkBufferBounds() {
+            if (!bufferCanvas) return true;
+            const rect = container.getBoundingClientRect();
+            const visWorldW = rect.width * bufferScale / zoom;
+            const visWorldH = rect.height * bufferScale / zoom;
+            const margin = visWorldW * 0.3;
+            const dx = Math.abs(viewX - bufferCenterX);
+            const dz = Math.abs(viewZ - bufferCenterZ);
+            return dx > (bufferWorldW - visWorldW) / 2 - margin ||
+                   dz > (bufferWorldH - visWorldH) / 2 - margin;
         }
 
         function doSearch() {
@@ -662,17 +757,19 @@
 
             setTimeout(() => {
                 try {
+                    const t0 = performance.now();
                     const results = search_biome(
                         BigInt(p.seed), p.version, false,
                         p.biome, p.windowSize,
                         p.originX, p.originZ,
                         p.radius, p.count
                     );
+                    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
 
                     markers = results || [];
-                    displayResults(results);
-                    updateMarkers();
-                    setStatus(`找到 ${(results || []).length} 个结果`, 'ready');
+                    displayResults(results, elapsed);
+                    drawFromBuffer();
+                    setStatus(`找到 ${markers.length} 个结果 · 耗时 ${elapsed}s`, 'ready');
                 } catch (e) {
                     setStatus('搜索失败: ' + e.message, 'error');
                     console.error(e);
@@ -681,7 +778,7 @@
             }, 10);
         }
 
-        function displayResults(results) {
+        function displayResults(results, elapsed) {
             const section = document.getElementById('resultsSection');
             const list = document.getElementById('resultsList');
             const countEl = document.getElementById('resultsCount');
@@ -694,13 +791,13 @@
             }
 
             section.style.display = 'block';
-            countEl.textContent = results.length;
+            countEl.textContent = results.length + ' · ' + elapsed + 's';
             list.innerHTML = results.map((r, i) => `
                 <div class="result-item" data-idx="${i}" data-x="${r.x}" data-z="${r.z}">
                     <div class="result-rank">${i + 1}</div>
                     <div class="result-info">
                         <div class="result-coords">${r.x}, ${r.z}</div>
-                        <div class="result-meta">距离 ${Math.round(r.distance)} 方块</div>
+                        <div class="result-meta">距离 ${Math.round(r.distance)} 方块 · /tp ${r.x} ~ ${r.z}</div>
                     </div>
                     <div class="result-chunks">${r.biome_chunks} 区块</div>
                 </div>
@@ -708,67 +805,42 @@
 
             list.querySelectorAll('.result-item').forEach(item => {
                 item.addEventListener('click', () => {
-                    // Highlight
                     list.querySelectorAll('.result-item').forEach(el => el.classList.remove('active'));
                     item.classList.add('active');
-                    activeResultIdx = parseInt(item.dataset.idx);
-
                     viewX = parseInt(item.dataset.x);
                     viewZ = parseInt(item.dataset.z);
-                    renderMap();
+                    checkBufferBounds() ? fullRender() : drawFromBuffer();
                 });
             });
         }
 
-        function updateMarkers() {
-            document.querySelectorAll('.marker').forEach(m => m.remove());
-            if (!mapData || markers.length === 0) return;
-
-            const rect = container.getBoundingClientRect();
-            const scale = mapData.scale;
-            const halfW = (mapData.w * scale) / 2;
-            const halfH = (mapData.h * scale) / 2;
-
-            markers.forEach(m => {
-                const px = ((m.x - viewX + halfW) / (halfW * 2)) * rect.width;
-                const py = ((m.z - viewZ + halfH) / (halfH * 2)) * rect.height;
-
-                if (px >= -10 && px <= rect.width + 10 && py >= -10 && py <= rect.height + 10) {
-                    const el = document.createElement('div');
-                    el.className = 'marker';
-                    el.style.left = px + 'px';
-                    el.style.top = py + 'px';
-                    container.appendChild(el);
-                }
-            });
-        }
-
-        // Mouse events
+        // ===== Mouse events =====
         container.addEventListener('mousedown', (e) => {
             isDragging = true;
             dragStartX = e.clientX;
-            dragStartZ = e.clientY;
+            dragStartY = e.clientY;
             dragViewX = viewX;
             dragViewZ = viewZ;
             container.style.cursor = 'grabbing';
         });
 
         window.addEventListener('mousemove', (e) => {
-            if (!mapData) return;
+            if (!bufferCanvas) return;
             const rect = container.getBoundingClientRect();
+            const visWorldW = rect.width * bufferScale / zoom;
+            const visWorldH = rect.height * bufferScale / zoom;
             const relX = (e.clientX - rect.left) / rect.width;
             const relZ = (e.clientY - rect.top) / rect.height;
-            const scale = mapData.scale;
-            const blockX = Math.floor(viewX + (relX - 0.5) * mapData.w * scale);
-            const blockZ = Math.floor(viewZ + (relZ - 0.5) * mapData.h * scale);
+            const blockX = Math.floor(viewX + (relX - 0.5) * visWorldW);
+            const blockZ = Math.floor(viewZ + (relZ - 0.5) * visWorldH);
             document.getElementById('mapCoords').textContent = `X: ${blockX}   Z: ${blockZ}`;
 
             if (isDragging) {
                 const dx = e.clientX - dragStartX;
-                const dz = e.clientY - dragStartZ;
-                const moveScale = mapData.scale * mapData.w / rect.width;
-                viewX = dragViewX - dx * moveScale;
-                viewZ = dragViewZ - dz * moveScale;
+                const dz = e.clientY - dragStartY;
+                viewX = dragViewX - dx * (visWorldW / rect.width);
+                viewZ = dragViewZ - dz * (visWorldH / rect.height);
+                drawFromBuffer();
             }
         });
 
@@ -776,35 +848,24 @@
             if (isDragging) {
                 isDragging = false;
                 container.style.cursor = 'default';
-                renderMap();
+                if (checkBufferBounds()) fullRender();
             }
         });
 
-        // Zoom
         container.addEventListener('wheel', (e) => {
             e.preventDefault();
             const oldZoom = zoom;
-            if (e.deltaY < 0) {
-                zoom = Math.min(zoom * 1.5, 32);
-            } else {
-                zoom = Math.max(zoom / 1.5, 0.25);
-            }
-            if (zoom !== oldZoom) renderMap();
+            zoom = e.deltaY < 0 ? Math.min(zoom * 1.5, 32) : Math.max(zoom / 1.5, 0.25);
+            if (zoom !== oldZoom) fullRender();
         });
 
-        // Buttons
         document.getElementById('searchBtn').addEventListener('click', doSearch);
-        document.getElementById('renderBtn').addEventListener('click', renderMap);
-
-        // Enter key triggers search
+        document.getElementById('renderBtn').addEventListener('click', fullRender);
         document.getElementById('seed').addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !document.getElementById('searchBtn').disabled) doSearch();
         });
+        window.addEventListener('resize', () => { if (bufferCanvas) fullRender(); });
 
-        // Resize
-        window.addEventListener('resize', () => { if (mapData) renderMap(); });
-
-        // Start
         initWasm();
     </script>
 </body>
