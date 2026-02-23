@@ -7,11 +7,13 @@ let ready = false;
 
 async function startup() {
     try {
-        await init();
+        // Resolve WASM URL relative to this worker script
+        const wasmUrl = new URL('./pkg/mc_biome_finder_web_bg.wasm', import.meta.url);
+        await init({ module_or_path: wasmUrl });
         ready = true;
         postMessage({ type: 'ready' });
     } catch (e) {
-        postMessage({ type: 'error', error: e.message });
+        postMessage({ type: 'error', error: String(e) });
     }
 }
 
