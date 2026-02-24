@@ -1,19 +1,23 @@
 // Tile rendering Web Worker (ES Module)
 // Each worker has its own WASM instance for parallel rendering
 
-import init, { generate_biome_map, search_biome_shard } from './pkg/mc_biome_finder_web.js';
-
 let ready = false;
+let generate_biome_map;
+let search_biome_shard;
 
 async function startup() {
     try {
-        // Resolve WASM URL relative to this worker script
-        const wasmUrl = new URL('./pkg/mc_biome_finder_web_bg.wasm', import.meta.url);
-        await init({ module_or_path: wasmUrl });
+        // Dynamic import — works reliably under any base path
+        const base = new URL('./', import.meta.url).href;
+        const mod = await import(base + 'pkg/mc_biome_finder_web.js');
+        const wasmUrl = base + 'pkg/mc_biome_finder_web_bg.wasm';
+        await mod.default({ module_or_path: wasmUrl });
+        generate_biome_map = mod.generate_biome_map;
+        search_biome_shard = mod.search_biome_shard;
         ready = true;
         postMessage({ type: 'ready' });
     } catch (e) {
-        postMessage({ type: 'error', error: String(e) });
+        postMessage({ type: 'error', error: String(e && e.stack || e) });
     }
 }
 
